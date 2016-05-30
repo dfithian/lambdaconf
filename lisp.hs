@@ -19,6 +19,8 @@ import qualified Data.Map as Map
 
 type ReplEnv = Map Text Lisp
 newtype Function = Function { unFunction :: forall m . (MonadIO m, MonadState ReplEnv m) => Lisp -> EitherT String m Lisp }
+instance Eq Function where
+  _ == _ = False
 
 data Lisp
   = NilL
@@ -29,6 +31,7 @@ data Lisp
   | QuotedL Lisp
   | ListL (NonEmpty Lisp)
   | LambdaL Function
+  deriving (Eq)
 
 instance Monoid Lisp where
   mempty = NilL
@@ -79,7 +82,9 @@ eval lisp = do
           -- when defining an expression, make sure to flatten the arguments
           -- we don't want a NonEmpty here because it's possible to both
           -- `(define add +)` and `(define add (lambda (x y) (+ x y)))`
-          ((ConstL name):args) -> modify (Map.insert name (mconcat args)) $> (StringL $ "defined " <> name)
+          ((ConstL name):terms) -> do
+            args <- eval $ mconcat terms
+            modify (Map.insert name args) $> (ConstL $ "defined " <> name)
           _ -> left $ "could not define " <> (intercalate " " . map show $ xs)
         ConstL "lambda" -> case xs of
           terms:body:[] -> do
@@ -114,18 +119,32 @@ expect aPrism explanation = \ case
                        . preview aPrism $ res ) $ NEL.toList xs
   other -> left $ "expected a list of " <> explanation <> ", but got " <> show other <> " instead"
 
+-- fold an operator over a list of at least two arguments
+foldOperator :: MonadIO m => (a -> a -> a) -> [a] -> EitherT String m a
+foldOperator op (a:b) = pure $ foldl' op a b
+foldOperator _ [] = left "expected at least one argument"
+
 main :: IO ()
 main = do
   let initialEnv = Map.fromList
-        [ ("+", LambdaL $ Function $ \ lisp -> IntL . sum <$> expect _IntL "int" lisp)
-        , ("-", LambdaL $ Function $ \ lisp -> IntL . sum . map negate <$> expect _IntL "int" lisp) -- this doesn't do a thing
-        , ("*", LambdaL $ Function $ \ lisp -> IntL . product <$> expect _IntL "int" lisp)
-        , ("/", LambdaL $ Function $ \ lisp -> do
-              ints <- expect _IntL "int" lisp
-              IntL <$> maybe (left "not enough arguments") (\ (x:|xs) -> pure $ foldl' div x xs) (NEL.nonEmpty ints) )
-        , ("and"  , LambdaL $ Function $ \ lisp -> BoolL . and <$> expect _BoolL "bool" lisp)
-        , ("or"   , LambdaL $ Function $ \ lisp -> BoolL . or <$> expect _BoolL "bool" lisp)
-        , ("not"  , LambdaL $ Function $ \ lisp -> BoolL . not . or <$> expect _BoolL "bool" lisp)
+        [ ("+"    , LambdaL $ Function $ \ lisp -> map  IntL         . foldOperator (+)  =<< expect _IntL  "int"  lisp)
+        , ("-"    , LambdaL $ Function $ \ lisp -> map  IntL         . foldOperator (-)  =<< expect _IntL  "int"  lisp)
+        , ("*"    , LambdaL $ Function $ \ lisp -> map  IntL         . foldOperator (*)  =<< expect _IntL  "int"  lisp)
+        , ("/"    , LambdaL $ Function $ \ lisp -> map  IntL         . foldOperator div  =<< expect _IntL  "int"  lisp)
+        , ("and"  , LambdaL $ Function $ \ lisp -> map  BoolL        . foldOperator (&&) =<< expect _BoolL "bool" lisp)
+        , ("or"   , LambdaL $ Function $ \ lisp -> map  BoolL        . foldOperator (||) =<< expect _BoolL "bool" lisp)
+        , ("not"  , LambdaL $ Function $ \ lisp -> map (BoolL . not) . foldOperator (||) =<< expect _BoolL "bool" lisp)
+        , ("if"   , LambdaL $ Function $ \ case
+              ListL ((BoolL b):|xs) -> if b then eval (maybe NilL ListL $ NEL.nonEmpty xs) else pure NilL
+              _ -> left "expected boolean expression"
+          )
+        , ("eq"   , LambdaL $ Function $ \ case
+              ListL (x:|xs) -> do
+                resX <- eval x
+                resXs <- mapM eval xs
+                pure . BoolL . all ((==) resX) $ resXs
+              _ -> left "expected list expression"
+          )
         , ("print", LambdaL $ Function (pure . StringL . tshow)) ]
       read = putStr "> " >> parse . pack <$> getLine
       runEnv = fix $ \ continue -> do
