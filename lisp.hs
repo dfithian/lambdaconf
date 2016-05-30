@@ -78,6 +78,7 @@ eval :: (MonadIO m, MonadState ReplEnv m) => Lisp -> EitherT String m Lisp
 eval lisp = do
   let special :: (MonadIO m, MonadState ReplEnv m) => NonEmpty Lisp -> EitherT String m Lisp
       special (x:|xs) = case x of
+        ConstL "do" -> maybe NilL ListL . NEL.nonEmpty <$> mapM eval xs
         ConstL "define" -> case xs of
           -- when defining an expression, make sure to flatten the arguments
           -- we don't want a NonEmpty here because it's possible to both
@@ -99,15 +100,15 @@ eval lisp = do
         ConstL name -> do
           f <- maybe (left $ unpack name <> " not defined") eval =<< gets (Map.lookup name)
           args <- mapM eval xs
-          pure . ListL $ f:|args
+          eval . ListL $ f:|args
         LambdaL (Function f) -> maybe (left $ "must supply an argument") (f . ListL) . NEL.nonEmpty $ xs
-        other -> left $ show other <> " " <> (intercalate ", " . map show $ xs) <> " is not a valid argument list"
+        other -> left $ show other <> ", " <> (intercalate ", " . map show $ xs) <> " is not a valid argument list"
 
   case lisp of
     -- evaluate twice when encountering a list:
     -- first, to extract lambdas
     -- second, to run them
-    ListL xs -> eval =<< special xs
+    ListL xs -> special xs
     ConstL name -> pure . maybe (ConstL name) id =<< gets (Map.lookup name) -- lookup with fallback
     _ -> pure lisp
 
